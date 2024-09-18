@@ -1,9 +1,15 @@
 import streamlit as st
-from Crypto.Cipher import AES, PKCS1_OAEP, ARC4
+from Crypto.Cipher import AES, ARC4
 from Crypto.PublicKey import RSA
+from Crypto.Cipher import PKCS1_OAEP
 from Crypto.Util.Padding import pad, unpad
 from Crypto.Random import get_random_bytes
 import base64
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+import hashlib
 
 # AES encryption (CBC mode with padding)
 def encrypt_aes(message, key):
@@ -72,7 +78,7 @@ def decrypt_rc4(encrypted_message_b64, key):
     decrypted_message = cipher.decrypt(encrypted_message)
     return decrypted_message.decode('utf-8')
 
-# RSA encryption (for simplicity in demonstration)
+# RSA encryption/decryption
 def generate_rsa_keypair():
     key = RSA.generate(2048)
     private_key = key.export_key()
@@ -93,9 +99,69 @@ def decrypt_rsa(encrypted_message_b64, private_key):
     decrypted_message = cipher.decrypt(encrypted_message)
     return decrypted_message.decode('utf-8')
 
+# ECC encryption/decryption
+def generate_ecc_keypair():
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    public_key = private_key.public_key()
+    private_key_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+    public_key_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+    return private_key_pem, public_key_pem
+
+def encrypt_ecc(message, public_key_pem):
+    # Load public key
+    public_key = serialization.load_pem_public_key(public_key_pem)
+
+    # Generate ECC private key for encryption
+    private_key = ec.generate_private_key(ec.SECP256R1())
+
+    # Perform ECDH to derive a shared key
+    shared_key = private_key.exchange(ec.ECDH(), public_key)
+
+    # Derive a symmetric key from the shared key using SHA-256
+    shared_key = hashlib.sha256(shared_key).digest()
+
+    # Encrypt the message using AES
+    cipher = AES.new(shared_key, AES.MODE_EAX)
+    ciphertext, tag = cipher.encrypt_and_digest(message.encode('utf-8'))
+
+    # Encode as base64 for easy transmission
+    encrypted_message_b64 = base64.b64encode(cipher.nonce + tag + ciphertext).decode('utf-8')
+    return encrypted_message_b64
+
+def decrypt_ecc(encrypted_message_b64, private_key_pem):
+    # Load private key
+    private_key = serialization.load_pem_private_key(private_key_pem, password=None)
+
+    # Load encrypted message
+    encrypted_message = base64.b64decode(encrypted_message_b64)
+
+    # Extract nonce, tag, and ciphertext
+    nonce, tag, ciphertext = encrypted_message[:16], encrypted_message[16:32], encrypted_message[32:]
+
+    # Generate ECC public key from private key
+    public_key = private_key.public_key()
+
+    # Perform ECDH to derive the shared key
+    shared_key = private_key.exchange(ec.ECDH(), public_key)
+
+    # Derive the symmetric key from the shared key using SHA-256
+    shared_key = hashlib.sha256(shared_key).digest()
+
+    # Decrypt the message using AES
+    cipher = AES.new(shared_key, AES.MODE_EAX, nonce=nonce)
+    decrypted_message = cipher.decrypt_and_verify(ciphertext, tag)
+    return decrypted_message.decode('utf-8')
+
 # Streamlit App Layout
 def main():
-    st.title("AES, Elliptic Curve (RSA Demo), and RC4 Encryption Tool")
+    st.title("AES, ECC, RC4, and RSA Encryption Tool")
 
     # Sidebar with names displayed vertically
     st.sidebar.title("Team Members")
@@ -107,7 +173,7 @@ def main():
     st.sidebar.write("6.Vilma")
 
     # Select Encryption Method
-    method = st.selectbox("Choose Encryption Method", ["AES", "Elliptic Curve (RSA)", "RC4"])
+    method = st.selectbox("Choose Encryption Method", ["AES", "ECC", "RC4", "RSA"])
 
     if method == "AES":
         st.subheader("AES Encryption")
@@ -129,11 +195,48 @@ def main():
                 decrypted_message = decrypt_aes(encrypted_message, key)
                 st.write("Decrypted Message:", decrypted_message)
 
-    elif method == "Elliptic Curve (RSA)":
-        st.subheader("Elliptic Curve (RSA) Encryption")
+    elif method == "ECC":
+        st.subheader("Elliptic Curve Encryption")
         message = st.text_input("Enter the message")
 
-        # Generate RSA keys
+        if st.button("Generate ECC Keypair"):
+            private_key_pem, public_key_pem = generate_ecc_keypair()
+            st.session_state['private_key_pem'] = private_key_pem
+            st.session_state['public_key_pem'] = public_key_pem
+            st.write("Public Key:", public_key_pem.decode('utf-8'))
+            st.write("Private Key (Keep this safe):", private_key_pem.decode('utf-8'))
+
+        if 'private_key_pem' in st.session_state and 'public_key_pem' in st.session_state:
+            public_key_pem = st.session_state['public_key_pem']
+            private_key_pem = st.session_state['private_key_pem']
+
+            if st.button("Encrypt"):
+                encrypted_message = encrypt_ecc(message, public_key_pem)
+                st.write("Encrypted Message:", encrypted_message)
+
+            if st.button("Decrypt"):
+                encrypted_message = st.text_area("Enter the encrypted message")
+                decrypted_message = decrypt_ecc(encrypted_message, private_key_pem)
+                st.write("Decrypted Message:", decrypted_message)
+
+    elif method == "RC4":
+        st.subheader("RC4 Encryption")
+        message = st.text_input("Enter the message")
+        key = st.text_input("Enter a key", type="password")
+
+        if st.button("Encrypt"):
+            encrypted_message = encrypt_rc4(message, key)
+            st.write("Encrypted Message:", encrypted_message)
+
+        if st.button("Decrypt"):
+            encrypted_message = st.text_area("Enter the encrypted message")
+            decrypted_message = decrypt_rc4(encrypted_message, key)
+            st.write("Decrypted Message:", decrypted_message)
+
+    elif method == "RSA":
+        st.subheader("RSA Encryption")
+        message = st.text_input("Enter the message")
+
         if st.button("Generate RSA Keypair"):
             private_key, public_key = generate_rsa_keypair()
             st.session_state['private_key'] = private_key
@@ -154,26 +257,5 @@ def main():
                 decrypted_message = decrypt_rsa(encrypted_message, private_key)
                 st.write("Decrypted Message:", decrypted_message)
 
-    elif method == "RC4":
-        st.subheader("RC4 Encryption")
-        message = st.text_input("Enter the message")
-        key = st.text_input("Enter a key (at least 5 bytes)", type="password")
-
-        if st.button("Encrypt"):
-            if len(key) < 5:
-                st.warning("Key must be at least 5 bytes long.")
-            else:
-                encrypted_message = encrypt_rc4(message, key)
-                st.write("Encrypted Message:", encrypted_message)
-
-        if st.button("Decrypt"):
-            encrypted_message = st.text_area("Enter the encrypted message")
-            if len(key) < 5:
-                st.warning("Key must be at least 5 bytes long.")
-            else:
-                decrypted_message = decrypt_rc4(encrypted_message, key)
-                st.write("Decrypted Message:", decrypted_message)
-
-# Run the Streamlit app
 if __name__ == "__main__":
     main()
